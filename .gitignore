@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+
+# 数据（大文件，不纳入版本控制）
+data/raw/
+data/feature_engineered/
+data/*.xlsx
+data/bert_embeddings.pkl
+data/bert_unique_texts.txt
+
+# 训练输出
+checkpoints/
+logs/
+predictions/
+figures/
+result/
+
+# IDE
+.vscode/
+.idea/
+
+# 系统
+.DS_Store
+Thumbs.db
