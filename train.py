@@ -163,15 +163,8 @@ class Trainer:
             )
             loss = self.criterion(pred, batch["target"])
             total_loss += loss.item()
-
-            # 反归一化：z-score → 原始 kW
-            mean = batch["target_mean"].cpu().unsqueeze(1)  # [B, 1]
-            std = batch["target_std"].cpu().unsqueeze(1)    # [B, 1]
-            pred_raw = pred.cpu() * std + mean
-            target_raw = batch["target"].cpu() * std + mean
-
-            all_pred.append(pred_raw)
-            all_target.append(target_raw)
+            all_pred.append(pred.cpu())
+            all_target.append(batch["target"].cpu())
 
         avg_loss = total_loss / len(self.val_loader)
         pred_concat = torch.cat(all_pred)

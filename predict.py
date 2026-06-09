@@ -104,7 +104,7 @@ def evaluate_by_hour(pred_df, horizon=24):
 @torch.no_grad()
 def predict(model, loader, split="val", horizon=24):
     """
-    遍历 DataLoader，收集预测值和目标值（反归一化到原始 kW）。
+    遍历 DataLoader，收集预测值和目标值。
 
     Returns:
       pred_df: DataFrame 包含 预测值, 目标值, 步长
@@ -128,14 +128,8 @@ def predict(model, loader, split="val", horizon=24):
             batch["mask"], batch["group_id"],
         )
 
-        # 反归一化：z-score → 原始 kW
-        mean = batch["target_mean"].unsqueeze(1).cpu()
-        std = batch["target_std"].unsqueeze(1).cpu()
-        pred_raw = pred.cpu() * std + mean
-        target_raw = batch["target"].cpu() * std + mean
-
-        all_preds.append(pred_raw.numpy())
-        all_targets.append(target_raw.numpy())
+        all_preds.append(pred.cpu().numpy())
+        all_targets.append(batch["target"].cpu().numpy())
         all_steps.append(np.tile(np.arange(horizon), (pred.size(0), 1)))
 
     # 构造 DataFrame

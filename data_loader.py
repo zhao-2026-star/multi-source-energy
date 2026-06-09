@@ -8,7 +8,7 @@ MPF-Net 数据加载器
 设计要点：
   - 每个变压器独立分组，避免跨变压器混叠
   - 文本特征预转索引（查 BERT 词汇表）
-  - 数值 NaN 统一填零，missing_mask 告知注意力层
+  - 数值 NaN/Inf 统一填零，missing_mask 告知注意力层
   - 多线程 DataLoader 最大化 GPU 利用率
 """
 
@@ -68,26 +68,19 @@ def build_text_vocab(bert_path):
 # ═══════════════════════════════════════════════════════════════
 
 class MPFDataset(Dataset):
-    """滑动窗口数据集，每个样本 = 168h 输入 → 24h 预测目标（归一化后）。"""
+    """滑动窗口数据集，每个样本 = 168h 输入 → 24h 预测目标。"""
 
     def __init__(self, df, text_vocab, city_map,
-                 window=WINDOW, horizon=HORIZON, stride=STRIDE,
-                 normalizer=None):
-        """
-        normalizer: dict {变压器编号: (mean, std)}，验证集沿用训练集统计量
-        为 None 时自动从本数据集计算（训练集）。
-        """
+                 window=WINDOW, horizon=HORIZON, stride=STRIDE):
         super().__init__()
         self.window = window
         self.horizon = horizon
         self.stride = stride
         total_len = window + horizon
-        self.is_train = (normalizer is None)
 
         # 按变压器分组，每个变压器独立建滑动窗口索引
         self.data = []   # 每个元素: dict of tensors
         self.index = []  # [(group_idx, window_start), ...]
-        self.normalizer = normalizer or {}  # {tid: (mean, std)}
 
         for tid, grp in df.groupby(TRANSFORMER_COL, sort=False):
             grp = grp.sort_values(TIME_COL).reset_index(drop=True)
@@ -117,15 +110,6 @@ class MPFDataset(Dataset):
             # ── 目标负荷 ──
             target_arr = np.nan_to_num(load_vals, nan=0.0, posinf=0.0, neginf=0.0)
 
-            # ── 目标归一化统计量（每台变压器独立 z-score） ──
-            # 使各变压器的误差对 loss 贡献相等，解决 MAPE 偏高问题
-            if tid in self.normalizer:
-                t_mean, t_std = self.normalizer[tid]
-            else:
-                t_mean = float(np.mean(target_arr))
-                t_std = float(np.std(target_arr)) or 1.0
-                self.normalizer[tid] = (t_mean, t_std)
-
             # ── 滑动窗口索引 ──
             starts = range(0, n - total_len + 1, stride)
             for s in starts:
@@ -137,8 +121,6 @@ class MPFDataset(Dataset):
                 "text": torch.from_numpy(text_arr),
                 "mask": torch.from_numpy(mask_arr),
                 "target": torch.from_numpy(target_arr),
-                "target_mean": t_mean,
-                "target_std": t_std,
                 "group_id": torch.tensor(city_id, dtype=torch.long),
             })
 
@@ -151,10 +133,6 @@ class MPFDataset(Dataset):
         end = start + self.window
 
         cat_slice = d["cat"][start:end]  # [W, 6]
-        target_slice = d["target"][end:end + self.horizon]
-        # z-score 归一化目标值
-        target_norm = (target_slice - d["target_mean"]) / (d["target_std"] + 1e-8)
-
         return {
             "num_feat":    d["num"][start:end],                    # [W, 18]
             "cat_feat": {                                          # {name: [W]}
@@ -166,9 +144,7 @@ class MPFDataset(Dataset):
             },
             "mask":        d["mask"][start:end],                   # [W]
             "group_id":    d["group_id"],                          # scalar
-            "target":      target_norm.float(),                    # [24] 归一化
-            "target_mean": torch.tensor(d["target_mean"], dtype=torch.float32),
-            "target_std":  torch.tensor(d["target_std"],  dtype=torch.float32),
+            "target":      d["target"][end:end + self.horizon],    # [24]
         }
 
 
@@ -196,9 +172,6 @@ def build_dataloaders(data_dir, bert_path, meta_path,
 
     loaders = []
     window_counts = []
-    normalizer = None
-    save_normalizer_path = os.path.join(data_dir, "target_normalizers.pkl")
-
     for name, pkl_name in [("训练", "train_feature_matrix.pkl"),
                             ("验证", "val_feature_matrix.pkl")]:
         pkl_path = os.path.join(data_dir, pkl_name)
@@ -206,17 +179,7 @@ def build_dataloaders(data_dir, bert_path, meta_path,
         df = pd.read_pickle(pkl_path)
 
         ds = MPFDataset(df, text_vocab, city_map,
-                        window=window, horizon=horizon, stride=stride,
-                        normalizer=normalizer)
-
-        # 训练集统计量传递给验证集
-        if normalizer is None:
-            normalizer = ds.normalizer
-            # 保存到文件，供 predict.py 使用
-            with open(save_normalizer_path, "wb") as f:
-                pickle.dump(normalizer, f)
-            print(f"            目标归一化统计量已保存: {save_normalizer_path}")
-
+                        window=window, horizon=horizon, stride=stride)
         nw = len(ds)
         window_counts.append(nw)
         print(f"            {nw:,} 个样本 ({name})")
