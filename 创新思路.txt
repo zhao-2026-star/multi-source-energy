@@ -319,3 +319,17 @@
   □ 第六步: 替换可视化中的模拟数据为真实结果，出最终论文配图  → 待处理
   □ 第七步: 分析结构消融 + 缺失实验结论，补充论文配图 10-11  → 待处理
 □ 第八步: 论文撰写                                        → 待处理
+ssh -p 32680 root@connect.nmb1.seetacloud.com
+镜像
+PyTorch  2.5.1
+Python  3.12(ubuntu22.04)
+CUDA  12.4
+GPU
+RTX 4090(24GB) * 1
+CPU
+16 vCPU Intel(R) Xeon(R) Gold 6430
+内存
+120GB
+硬盘
+系统盘:30 GB
+数据盘:免费:50GB SSD  付费:0GB
