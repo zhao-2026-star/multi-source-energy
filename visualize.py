@@ -123,6 +123,11 @@ _setup_chinese_font()
 
 OUT_DIR = "./figures"
 
+def _savefig(fname_base):
+    """同时保存 PNG (位图) 和 SVG (向量格式，Visio 可直接编辑)。"""
+    plt.savefig(os.path.join(OUT_DIR, f"{fname_base}.png"))
+    plt.savefig(os.path.join(OUT_DIR, f"{fname_base}.svg"))
+
 # ── 特征列分组（用于热力图） ──
 FEATURE_GROUPS = {
     "负荷滞后":  ["lag_1h", "lag_2h", "lag_3h", "lag_24h", "lag_48h", "lag_168h"],
@@ -192,7 +197,7 @@ def fig1_architecture():
     ax.annotate("", xy=(5.0, 2.85), xytext=(3.0, 2.85),
                 arrowprops=dict(arrowstyle="->", color=C_RED, lw=1.2, linestyle="dashed"))
 
-    fig.savefig(os.path.join(OUT_DIR, "fig1_architecture.png"))
+    _savefig( "fig1_architecture")
     plt.close()
     print(f"  [OK] 图1: 模型架构 → figures/fig1_architecture.png")
 
@@ -243,35 +248,26 @@ def fig2_feature_correlation(data_path):
         if label.get_text() == target_cn:
             label.set_fontweight("bold")
 
-    # 添加文本特征说明
-    text_note = "注：文本特征(节假日名、极端天气)为类别型，\n未纳入 Pearson 相关计算"
-    ax.text(0.5, -0.06, text_note, transform=ax.transAxes, fontsize=8,
-            ha="center", va="top", color=C_PURPLE,
-            bbox=dict(boxstyle="round", facecolor="white", edgecolor=C_PURPLE, alpha=0.7))
-
     ax.set_title("特征 Pearson 相关矩阵", fontweight="bold", pad=15)
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT_DIR, "fig2_feature_correlation.png"))
+    _savefig( "fig2_feature_correlation")
     plt.close()
     print(f"  [OK] 图2: 特征相关 → figures/fig2_feature_correlation.png")
 
 
 # ═══════════════════════════════════════════════════════════════
-# 图 3: 聚类注意力软分配 - 三面板 (IEEE TPAMI/TPWRS 风格)
+# 图 3: 聚类注意力软分配 — 均值分配矩阵热力图
 # ═══════════════════════════════════════════════════════════════
-# 参考: NeurIPS 2023-2024, ICML 2024 聚类可视化最佳实践
-#   (A) t-SNE 散点图 — 高维分配向量降维，颜色=主导聚类
-#   (B) 聚类规模环形图 — 每个聚类的变压器数
-#   (C) 分配置信度箱线图 — 每个聚类的最大分配概率分布
+# 按主导聚类分组，每组计算对 K=5 个聚类中心的平均软分配权重，
+# 绘制 5×5 热力图。对角线越亮 → 聚类越"硬"（结构清晰）；
+# 非对角线有颜色 → 体现软分配特性（跨组共享信息）。
 
 def fig3_clustering_assignments(assignments_file=None):
-    """三面板聚类可视化：t-SNE + 环形图 + 置信度箱线图。"""
-    from sklearn.manifold import TSNE
-
-    # ── 载入或生成数据 ──
     if assignments_file and os.path.exists(assignments_file):
         df = pd.read_csv(assignments_file)
-        cluster_cols = [f"Cluster {i+1}" for i in range(5)]
+        cluster_cols = [c for c in df.columns if c.startswith("Cluster") or c.startswith("cluster")]
+        if not cluster_cols:
+            cluster_cols = [f"Cluster {i+1}" for i in range(5)]
     else:
         np.random.seed(42)
         n = 421
@@ -284,115 +280,52 @@ def fig3_clustering_assignments(assignments_file=None):
         df = pd.DataFrame(soft, columns=[f"Cluster {i+1}" for i in range(5)])
         cluster_cols = [f"Cluster {i+1}" for i in range(5)]
 
-    data = df[cluster_cols].values                # [N, 5]
-    dominant = np.argmax(data, axis=1)            # 0-4
-    max_conf = np.max(data, axis=1)               # 每个样本的最高分配概率
+    data = df[cluster_cols].values  # [N, K]
+    dominant = np.argmax(data, axis=1)
     N, K = data.shape
 
-    # ── 统一颜色 ──
-    cluster_colors = [C_BLUE, C_ORANGE, C_GREEN, C_RED, C_PURPLE]
-    cluster_names = [f"聚类 {i+1}" for i in range(K)]
-
-    # ── 创建画布 ──
-    fig = plt.figure(figsize=(16, 5))
-    gs = fig.add_gridspec(1, 3, width_ratios=[1.4, 1.0, 1.0], wspace=0.35)
-
-    # ===========================================================
-    # Panel A: t-SNE 散点图 — 降维后可视化聚类结构
-    # ===========================================================
-    ax_a = fig.add_subplot(gs[0])
-    tsne = TSNE(n_components=2, perplexity=min(30, N//4), random_state=42, max_iter=1000)
-    embed = tsne.fit_transform(data)  # [N, 2]
-
+    # 计算均值：每个"主导聚类"组对 K 个中心的平均分配
+    mean_matrix = np.zeros((K, K))
     for k in range(K):
         mask = dominant == k
-        ax_a.scatter(embed[mask, 0], embed[mask, 1],
-                     c=cluster_colors[k], label=cluster_names[k],
-                     s=12, alpha=0.6, edgecolors="none")
+        if mask.any():
+            mean_matrix[k] = data[mask].mean(axis=0)
 
-    # 绘制各聚类的 95% 置信椭圆
-    from matplotlib.patches import Ellipse
-    for k in range(K):
-        mask = dominant == k
-        if mask.sum() < 3:
-            continue
-        pts = embed[mask]
-        mean = pts.mean(axis=0)
-        cov = np.cov(pts.T)
-        vals, vecs = np.linalg.eigh(cov)
-        angle = np.degrees(np.arctan2(vecs[1, 0], vecs[0, 0]))
-        width, height = 2 * np.sqrt(vals) * 2.0  # ~95% 置信
-        ell = Ellipse(xy=mean, width=width, height=height,
-                      angle=angle, facecolor="none", edgecolor=cluster_colors[k],
-                      linewidth=1.2, linestyle="--", alpha=0.5)
-        ax_a.add_patch(ell)
+    # ── 绘制 5×5 热力图 ──
+    fig, ax = plt.subplots(figsize=(7, 6))
+    cmap = sns.color_palette("YlOrRd", as_cmap=True)
 
-    ax_a.set_xlabel("t-SNE 维度 1", fontsize=11)
-    ax_a.set_ylabel("t-SNE 维度 2", fontsize=11)
-    ax_a.set_title("(A) 聚类分配向量 t-SNE 可视化", fontweight="bold", fontsize=12)
-    ax_a.legend(fontsize=8, loc="best", markerscale=2)
-    ax_a.grid(alpha=0.2)
+    im = ax.imshow(mean_matrix, cmap=cmap, vmin=0, vmax=1, aspect="equal")
 
-    # ===========================================================
-    # Panel B: 环形图 — 各聚类规模
-    # ===========================================================
-    ax_b = fig.add_subplot(gs[1])
-    sizes = [(dominant == k).sum() for k in range(K)]
-    explode = [0.03] * K
+    # 在单元格标注数值
+    for i in range(K):
+        for j in range(K):
+            val = mean_matrix[i, j]
+            text_color = "white" if val > 0.6 else "black"
+            ax.text(j, i, f"{val:.3f}", ha="center", va="center",
+                    fontsize=14, fontweight="bold" if i == j else "normal",
+                    color=text_color)
 
-    wedges, texts, autotexts = ax_b.pie(
-        sizes, labels=None, autopct="%1.1f%%",
-        startangle=90, pctdistance=0.78,
-        colors=cluster_colors, explode=explode,
-        wedgeprops={"width": 0.35, "edgecolor": "white", "linewidth": 1.5},
-    )
-    for at in autotexts:
-        at.set_fontsize(10)
-        at.set_fontweight("bold")
+    ax.set_xticks(range(K))
+    ax.set_xticklabels([f"聚类中心 {i+1}" for i in range(K)], fontsize=12)
+    ax.set_yticks(range(K))
+    ax.set_yticklabels([f"主导聚类 {i+1}" for i in range(K)], fontsize=12)
+    ax.set_xlabel("被分配到的聚类中心", fontsize=12, labelpad=10)
+    ax.set_ylabel("按主导聚类分组", fontsize=12, labelpad=10)
+    ax.set_title("聚类注意力软分配矩阵 (均值)", fontweight="bold", fontsize=14, pad=15)
 
-    # 中心文字
-    ax_b.text(0, 0, f"N={N}", ha="center", va="center", fontsize=14, fontweight="bold")
-    ax_b.text(0, -0.18, "变压器", ha="center", va="center", fontsize=10, color="gray")
+    # 对角线框
+    for i in range(K):
+        rect = plt.Rectangle((i - 0.5, i - 0.5), 1, 1,
+                             fill=False, edgecolor=C_BLUE, linewidth=2.5, linestyle="-")
+        ax.add_patch(rect)
 
-    # 图例
-    legend_labels = [f"{cluster_names[k]} ({sizes[k]}台)" for k in range(K)]
-    ax_b.legend(wedges, legend_labels, fontsize=8, loc="center left",
-                bbox_to_anchor=(-0.15, 0.5))
-    ax_b.set_title("(B) 聚类规模分布", fontweight="bold", fontsize=12)
+    # 色条
+    cbar = fig.colorbar(im, ax=ax, shrink=0.85, pad=0.02)
+    cbar.set_label("平均软分配概率", fontsize=11)
 
-    # ===========================================================
-    # Panel C: 箱线图 — 每聚类最大分配概率（置信度）
-    # ===========================================================
-    ax_c = fig.add_subplot(gs[2])
-    conf_data = [max_conf[dominant == k] for k in range(K)]
-
-    bp = ax_c.boxplot(conf_data, patch_artist=True, widths=0.5,
-                      medianprops={"color": "black", "linewidth": 1.5},
-                      whiskerprops={"linewidth": 1.0},
-                      capprops={"linewidth": 1.0},
-                      boxprops={"linewidth": 1.0})
-    for k, box in enumerate(bp["boxes"]):
-        box.set_facecolor(cluster_colors[k])
-        box.set_alpha(0.5)
-
-    # 叠加散点
-    for k in range(K):
-        jitter = np.random.RandomState(42).uniform(-0.12, 0.12, len(conf_data[k]))
-        ax_c.scatter(np.full_like(conf_data[k], k + 1) + jitter, conf_data[k],
-                     s=5, alpha=0.25, color=cluster_colors[k])
-
-    ax_c.set_xticklabels(cluster_names, fontsize=10)
-    ax_c.set_ylabel("最大分配概率", fontsize=11)
-    ax_c.set_title("(C) 聚类分配置信度", fontweight="bold", fontsize=12)
-    ax_c.set_ylim(0.15, 1.05)
-    ax_c.axhline(y=1.0 / K, color="gray", linewidth=0.8, linestyle=":",
-                 alpha=0.6, label=f"均匀分配 (1/K={1/K:.1f})")
-    ax_c.legend(fontsize=8, loc="lower right")
-    ax_c.grid(axis="y", alpha=0.2)
-
-    fig.suptitle("聚类注意力软分配分析 (Clustering Attention, K=5)",
-                 fontweight="bold", fontsize=14, y=1.02)
-    fig.savefig(os.path.join(OUT_DIR, "fig3_clustering_assignments.png"))
+    fig.tight_layout()
+    _savefig( "fig3_clustering_assignments")
     plt.close()
     print(f"  [OK] 图3: 聚类分配 → figures/fig3_clustering_assignments.png")
 
@@ -439,7 +372,7 @@ def fig4_baseline_comparison(results_file=None):
 
     fig.suptitle("基线模型对比", fontweight="bold", fontsize=14, y=1.03)
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT_DIR, "fig4_baseline_comparison.png"))
+    _savefig( "fig4_baseline_comparison")
     plt.close()
     print(f"  [OK] 图4: 基线对比 → figures/fig4_baseline_comparison.png")
 
@@ -484,7 +417,7 @@ def fig5_data_ablation(results_file=None):
 
     fig.suptitle("数据消融: 不同特征来源的影响", fontweight="bold", fontsize=14, y=1.03)
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT_DIR, "fig5_data_ablation.png"))
+    _savefig( "fig5_data_ablation")
     plt.close()
     print(f"  [OK] 图5: 数据消融 → figures/fig5_data_ablation.png")
 
@@ -532,7 +465,7 @@ def fig6_prediction_timeseries(results_file=None):
     ax.xaxis.set_major_locator(plt.matplotlib.dates.DayLocator())
 
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT_DIR, "fig6_prediction_timeseries.png"))
+    _savefig( "fig6_prediction_timeseries")
     plt.close()
     print(f"  [OK] 图6: 预测vs真实 → figures/fig6_prediction_timeseries.png")
 
@@ -576,7 +509,7 @@ def fig7_error_distribution(results_file=None):
     ax.legend(fontsize=9)
 
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT_DIR, "fig7_error_distribution.png"))
+    _savefig( "fig7_error_distribution")
     plt.close()
     print(f"  [OK] 图7: 误差分布 → figures/fig7_error_distribution.png")
 
@@ -586,12 +519,11 @@ def fig7_error_distribution(results_file=None):
 # ═══════════════════════════════════════════════════════════════
 
 def fig8_hourly_error(results_file=None):
-    """24 小时每个步长的 RMSE/MAE 折线图。"""
+    """24 个预测步长的 RMSE/MAE 折线图（1=未来1h, 24=未来24h）。"""
     if results_file and os.path.exists(results_file):
         df = pd.read_pickle(results_file)
-        hours = np.arange(24)
         rmse_list, mae_list = [], []
-        for h in hours:
+        for h in range(24):
             mask = df["step"] == h
             if mask.any():
                 p, t = df.loc[mask, "prediction"].values, df.loc[mask, "target"].values
@@ -599,26 +531,26 @@ def fig8_hourly_error(results_file=None):
                 mae_list.append(np.mean(np.abs(p - t)))
     else:
         np.random.seed(42)
-        hours = np.arange(24)
-        pattern = 80 + 30 * np.sin(hours * np.pi / 12) + np.random.randn(24) * 5
+        pattern = 80 + 30 * np.sin(np.arange(24) * np.pi / 12) + np.random.randn(24) * 5
         rmse_list = pattern.tolist()
         mae_list = (pattern * 0.75).tolist()
 
+    hours = np.arange(1, 25)  # 1～24h
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(hours, rmse_list, "o-", color=C_RED, linewidth=2, markersize=6, label="RMSE")
     ax.plot(hours, mae_list, "s--", color=C_BLUE, linewidth=2, markersize=6, label="MAE")
 
     ax.fill_between(hours, rmse_list, mae_list, alpha=0.08, color=C_PURPLE)
 
-    ax.set_xlabel("预测步长 (小时)", fontsize=12)
+    ax.set_xlabel("预测超前时间 (小时)", fontsize=12)
     ax.set_ylabel("误差 (kW)", fontsize=12)
     ax.set_title("逐小时预测误差", fontweight="bold", fontsize=13)
-    ax.set_xticks(range(0, 24, 3))
+    ax.set_xticks(range(1, 25, 3))
     ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT_DIR, "fig8_hourly_error.png"))
+    _savefig( "fig8_hourly_error")
     plt.close()
     print(f"  [OK] 图8: 逐小时误差 → figures/fig8_hourly_error.png")
 
@@ -660,7 +592,7 @@ def fig9_loss_curves(history_file=None):
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT_DIR, "fig9_loss_curves.png"))
+    _savefig( "fig9_loss_curves")
     plt.close()
     print(f"  [OK] 图9: 损失曲线 → figures/fig9_loss_curves.png")
 
@@ -731,11 +663,12 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"所有图片已保存至: {OUT_DIR}/")
     import glob
-    for f in sorted(glob.glob(os.path.join(OUT_DIR, "*.png"))):
+    for f in sorted(glob.glob(os.path.join(OUT_DIR, "*"))):
         size = os.path.getsize(f) / 1024
-        print(f"  {os.path.basename(f):35s}  {size:.0f} KB")
+        tag = "SVG" if f.endswith(".svg") else "PNG"
+        print(f"  {os.path.basename(f):40s} {size:6.0f} KB [{tag}]")
     print(f"{'=' * 60}")
-    print("可视化完成!")
+    print("可视化完成! (SVG 可用 Visio 直接打开编辑)")
 
 
 def _detect_latest_run():
