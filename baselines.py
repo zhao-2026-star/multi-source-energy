@@ -380,20 +380,20 @@ ABLATION_CONFIGS = {
 
 STRUCTURE_ABLATION = {
     "mpfnet_full": {
-        "overrides": {"use_clustering": True, "use_pattern_fusion": True},
-        "desc": "完整 MPF-Net (ClusteringAttention + PatternFusion)",
+        "overrides": {"use_clustering": True,  "use_pattern_fusion": True},
+        "desc": "完整 MPF-Net（Clustering + PatternFusion）",
     },
     "mpfnet_no_clustering": {
         "overrides": {"use_clustering": False, "use_pattern_fusion": True},
         "desc": "去掉 ClusteringAttention → 含 PatternFusion",
     },
     "mpfnet_no_fusion": {
-        "overrides": {"use_clustering": True, "use_pattern_fusion": False},
+        "overrides": {"use_clustering": True,  "use_pattern_fusion": False},
         "desc": "去掉 PatternFusion → 含 ClusteringAttention",
     },
     "mpfnet_no_both": {
         "overrides": {"use_clustering": False, "use_pattern_fusion": False},
-        "desc": "去掉两者 → 仅 Encoder + 预测头",
+        "desc": "去掉 Clustering + PatternFusion → 仅 Encoder + 预测头",
     },
 }
 
@@ -415,7 +415,6 @@ STRUCTURE_ABLATION = {
 
 import numpy as np
 from scipy import interpolate
-import os
 
 MISSING_RATES = [0.0, 0.05, 0.10, 0.25, 0.50]
 
@@ -592,19 +591,6 @@ def compute_metrics(pred, target):
 # ═══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="MPF-Net 对比实验")
-    parser.add_argument("--run_id", type=int, default=None, help="实验编号（默认1）")
-    parser.add_argument("--mode", choices=["test", "baselines", "ablation", "missing", "all"],
-                        default="test", help="实验模式")
-    args = parser.parse_args()
-
-    run_id = args.run_id or 1
-    result_dir = run_utils.get_result_dir(run_id)
-    weight_dir = run_utils.get_weight_dir(run_id)
-    os.makedirs(result_dir, exist_ok=True)
-
     B, L, D = 4, 168, 18
     x = torch.randn(B, L, D)
 
@@ -667,11 +653,3 @@ if __name__ == "__main__":
         print(f"  {sname:20s} → {sopt['desc']}")
     print(f"\n缺失率测试: {MISSING_RATES}")
     print("\n基线模型 + 消融框架测试通过!")
-
-    # 保存测试结果摘要
-    with open(os.path.join(result_dir, "test_summary.txt"), "w", encoding="utf-8") as f:
-        f.write(f"实验 run{run_id} 模型框架验证通过\n")
-        f.write(f"注册基线模型: {list(BASELINE_REGISTRY.keys())}\n")
-        f.write(f"数据消融方案: {len(ABLATION_CONFIGS)} 种\n")
-        f.write(f"结构消融方案: {len(STRUCTURE_ABLATION)} 种\n")
-        f.write(f"缺失值策略: {len(MISSING_STRATEGIES)} 种\n")

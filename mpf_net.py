@@ -217,107 +217,72 @@ class ClusteringAttention(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 6. 多尺度时序模式融合 (Multi-Scale Temporal Pattern Fusion)
+# 6. 模式导向融合模块（PRformer 启发）
 # ═══════════════════════════════════════════════════════════════
 #
-# 设计思路：负荷曲线存在天然的嵌套周期性——小时级波动(k=3h)、
-# 半天级模式(k=12h)、日周期(k=24h)、多日趋势(k=48h/2天)。
-# 用4个不同感受野的一维深度可分离卷积在时序维度上提取各尺度模式，
-# 通过可学习门控自适应融合四个分支，残差连接保留原始编码信息。
-#
-# 与 ClusteringAttention 的关系：
-#   - ClusteringAttention 做空间分组（哪些变压器的用电模式相似）
-#   - PatternFusion 做时间分解（同时提取日周期/短时波动/趋势）
-#   - 空间 × 时间 = 完整的时空表征
-
-class DepthwiseTemporalConv(nn.Module):
-    """深度可分离时序卷积：先分组卷积（每通道独立），再逐点卷积（通道间交互）。"""
-
-    def __init__(self, d_model, kernel_size, padding=None):
-        super().__init__()
-        if padding is None:
-            padding = kernel_size // 2  # 保持序列长度不变
-        # 深度卷积：每通道独立，groups=d_model
-        self.depthwise = nn.Conv1d(d_model, d_model, kernel_size,
-                                   padding=padding, groups=d_model)
-        # 逐点卷积：通道间交互
-        self.pointwise = nn.Conv1d(d_model, d_model, kernel_size=1)
-        self.norm = nn.LayerNorm(d_model)
-
-    def forward(self, x):
-        # x: [B, L, D] → [B, D, L] → Conv1d → [B, D, L] → [B, L, D]
-        x_t = x.transpose(1, 2)
-        out = self.pointwise(self.depthwise(x_t))
-        return self.norm(out.transpose(1, 2))
-
+# 定义三种显式模式查询向量：季节模式、趋势模式、空间模式。
+# 每个模式做交叉注意力从编码特征中提取对应信息，
+# 最后通过可学习门控融合三种模式。
 
 class PatternFusion(nn.Module):
-    """多尺度时序卷积 + 门控自适应融合。
+    """模式导向的跨模态特征融合。"""
 
-    四个分支：
-      k=3  → 捕捉 1-3 小时内的短时波动（峰谷转折点）
-      k=12 → 捕捉半天级模式（上午/下午/夜间负荷形态）
-      k=24 → 捕捉日周期（每天的负荷曲线轮廓）
-      k=48 → 捕捉 2 日趋势（持续性上升或下降倾向）
-    """
-
-    def __init__(self, d_model, n_heads=None, d_ff=None, dropout=0.1):
+    def __init__(self, d_model, n_heads, d_ff, dropout=0.1):
         super().__init__()
-        kernel_sizes = [3, 12, 24, 48]
+        # 三种可学习模式查询
+        self.pattern_queries = nn.Parameter(torch.randn(3, 1, d_model))
+        nn.init.xavier_uniform_(self.pattern_queries)
 
-        self.branches = nn.ModuleList([
-            DepthwiseTemporalConv(d_model, k) for k in kernel_sizes
-        ])
+        # 标签: 0=季节性, 1=趋势性, 2=空间性
+        self.register_buffer("pattern_labels", torch.arange(3))
 
-        # 门控融合：根据全局池化特征学会分配各尺度权重
-        self.gate = nn.Sequential(
-            nn.Linear(d_model, d_model // 4),
-            nn.GELU(),
-            nn.Linear(d_model // 4, len(kernel_sizes)),
+        # 交叉注意力
+        self.cross_attn = nn.MultiheadAttention(d_model, n_heads, dropout, batch_first=True)
+
+        # 统计门控（元素级噪声过滤）
+        self.stat_gate = nn.Linear(d_model, d_model)
+
+        # 模式融合门控
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(d_model * 3, 3),
             nn.Softmax(dim=-1),
         )
 
-        # 融合后精炼
+        # 残差 FFN
         self.norm = nn.LayerNorm(d_model)
         self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_model * 2),
+            nn.Linear(d_model, d_ff),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model * 2, d_model),
+            nn.Linear(d_ff, d_model),
         )
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         """
-        x: [B, L, d_model] — 编码器输出（已含聚类上下文）
-
+        x: [B, L, d_model] — 编码器输出
         Returns:
-          fused: [B, 1, d_model] — 多尺度融合后的聚合表示
+          fused: [B, 1, d_model] — 模式融合后的表示
         """
-        B, L, D = x.shape
+        B, D = x.size(0), x.size(-1)
+        queries = self.pattern_queries.unsqueeze(1).expand(3, B, 1, D)  # [3, B, 1, D]
 
-        # 各尺度分支 [B, L, D] → 均值池化 → [B, D]
-        branch_outs = []
-        for branch in self.branches:
-            out = branch(x)                    # [B, L, D]
-            out = out + x                      # 残差：保留原始信息
-            pooled = out.mean(dim=1)            # [B, D]
-            branch_outs.append(pooled)
+        # 每个模式做交叉注意力
+        pattern_outs = []
+        for i in range(3):
+            q = queries[i]                                     # [B, 1, D]
+            out, _ = self.cross_attn(q, x, x)                  # [B, 1, D]
+            gate = torch.sigmoid(self.stat_gate(out))           # [B, 1, D]
+            pattern_outs.append(out * gate)
 
-        # 门控权重
-        global_feat = x.mean(dim=1)            # [B, D]  全局池化作为门控输入
-        weights = self.gate(global_feat)        # [B, 4]  每个样本各尺度权重
+        # 门控融合
+        concat = torch.cat(pattern_outs, dim=-1)                # [B, 1, 3D]
+        weights = self.fusion_gate(concat)                      # [B, 1, 3]
 
-        # 加权融合
-        fused = sum(
-            w[:, k].unsqueeze(1) * branch_outs[k]
-            for k in range(len(self.branches))
-        )                                      # [B, D]
-
-        # 精炼
-        fused = fused.unsqueeze(1)              # [B, 1, D]
+        fused = sum(w.unsqueeze(-1) * p for w, p in zip(weights.unbind(-1), pattern_outs))
         fused = fused + self.dropout(self.ffn(self.norm(fused)))
-        return fused  # [B, 1, D]
+
+        return fused  # [B, 1, d_model]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -325,11 +290,7 @@ class PatternFusion(nn.Module):
 # ═══════════════════════════════════════════════════════════════
 
 class MultiTaskHead(nn.Module):
-    """共享编码层 + 每组专属预测头的多任务输出。
-
-    共享层提取通用预测模式，每城市组独立学习个性化偏差。
-    结构消融实验验证：该设计优于 CityEmbedding 注入方案。
-    """
+    """共享 Transformer 层 + 每组专属预测头的多任务输出。"""
 
     def __init__(self, d_model, n_groups, forecast_horizon=24):
         super().__init__()
@@ -348,9 +309,14 @@ class MultiTaskHead(nn.Module):
         ])
 
     def forward(self, x, group_ids):
+        """
+        x:          [B, 1, d_model]
+        group_ids:  [B] — 城市组编号
+        """
         x = x.squeeze(1)                     # [B, d_model]
         shared_out = self.shared(x)          # [B, 24]
 
+        # 每个样本只走对应组的预测头
         group_out = torch.zeros_like(shared_out)
         for g in range(len(self.group_heads)):
             mask = (group_ids == g)
@@ -372,10 +338,11 @@ class MPFNet(nn.Module):
 
     Pipeline:
       FeatureEmbedding → TransformerEncoder → ClusteringAttention + Skip
-        → MultiTaskHead
+        → PatternFusion → MultiTaskHead
 
     结构消融支持:
       设置 use_clustering=False 跳过聚类注意力
+      设置 use_pattern_fusion=False 跳过模式融合
     """
 
     def __init__(self, config):
@@ -411,11 +378,10 @@ class MPFNet(nn.Module):
                 config["d_model"], config["n_clusters"],
             )
 
-        # 多尺度时序模式融合
+        # 模式融合
         if self.use_pattern_fusion:
             self.pattern_fusion = PatternFusion(
-                config["d_model"], config["n_heads"], config.get("d_ff", 512),
-                config.get("dropout", 0.1),
+                config["d_model"], config["n_heads"], config["d_ff"],
             )
 
         # 预测头
@@ -461,11 +427,11 @@ class MPFNet(nn.Module):
             K = self.clustering.n_clusters if hasattr(self, "clustering") else 0
             assignments = torch.zeros(B, max(K, 1), device=device)
 
-        # 结构消融: 多尺度时序模式融合
+        # 结构消融: 模式融合
         if self.use_pattern_fusion:
-            pattern = self.pattern_fusion(x)               # [B, 1, d_model]
+            pattern = self.pattern_fusion(x)              # [B, 1, d_model]
         else:
-            pattern = x.mean(dim=1, keepdim=True)          # [B, 1, d_model] (fallback)
+            pattern = x.mean(dim=1, keepdim=True)         # [B, 1, d_model] (fallback)
 
         pred = self.head(pattern, group_ids)              # [B, 24]
         return pred, assignments
