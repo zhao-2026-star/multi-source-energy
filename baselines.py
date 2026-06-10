@@ -380,12 +380,20 @@ ABLATION_CONFIGS = {
 
 STRUCTURE_ABLATION = {
     "mpfnet_full": {
-        "overrides": {"use_clustering": True},
-        "desc": "完整 MPF-Net (ClusteringAttention + CityEmbedding)",
+        "overrides": {"use_clustering": True, "use_pattern_fusion": True},
+        "desc": "完整 MPF-Net (ClusteringAttention + PatternFusion)",
     },
     "mpfnet_no_clustering": {
-        "overrides": {"use_clustering": False},
-        "desc": "去掉 ClusteringAttention → 仅 Encoder + 预测头",
+        "overrides": {"use_clustering": False, "use_pattern_fusion": True},
+        "desc": "去掉 ClusteringAttention → 含 PatternFusion",
+    },
+    "mpfnet_no_fusion": {
+        "overrides": {"use_clustering": True, "use_pattern_fusion": False},
+        "desc": "去掉 PatternFusion → 含 ClusteringAttention",
+    },
+    "mpfnet_no_both": {
+        "overrides": {"use_clustering": False, "use_pattern_fusion": False},
+        "desc": "去掉两者 → 仅 Encoder + 预测头",
     },
 }
 
