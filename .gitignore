@@ -18,6 +18,7 @@ logs/
 predictions/
 figures/
 result/
+runs/
 
 # IDE
 .vscode/

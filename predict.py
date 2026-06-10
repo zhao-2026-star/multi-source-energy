@@ -33,14 +33,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mpf_net import build_model, default_config
 from data_loader import build_dataloaders, MPFDataset, build_text_vocab
 from data_loader import NUMERICAL_COLS, CATEGORICAL_COLS, TEXT_COLS, TARGET_COL
+import run_utils
 
 
 DATA_DIR = "./data/feature_engineered"
 BERT_PATH = "./data/bert_embeddings.pkl"
 META_PATH = "./data/raw/变压器台账.xlsx"
-CKPT_DIR = "./checkpoints"
 OUT_DIR = "./predictions"
-os.makedirs(OUT_DIR, exist_ok=True)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -148,17 +147,31 @@ def predict(model, loader, split="val", horizon=24):
 
 def parse_args():
     p = argparse.ArgumentParser(description="MPF-Net 预测")
-    p.add_argument("--checkpoint", default=os.path.join(CKPT_DIR, "mpf_net_best.pth"))
+    p.add_argument("--checkpoint", default=None)
     p.add_argument("--split", choices=["train", "val"], default="val")
     p.add_argument("--batch", type=int, default=256)
     p.add_argument("--workers", type=int, default=0)
+    p.add_argument("--run_id", type=int, default=None,
+                   help="实验编号 (自动检测最新)")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+
+    # ── 自动检测 run_id / checkpoint ──
+    run_id = args.run_id or _detect_latest_run()
+    if args.checkpoint:
+        ckpt_path = args.checkpoint
+    else:
+        ckpt_dir = run_utils.get_weight_dir(run_id)
+        ckpt_path = os.path.join(ckpt_dir, "mpf_net_best.pth")
+
+    pred_dir = run_utils.get_prediction_dir(run_id) if run_id else OUT_DIR
+    os.makedirs(pred_dir, exist_ok=True)
+
     print("=" * 60)
-    print(f"MPF-Net 预测   {args.split}集")
+    print(f"MPF-Net 预测   {args.split}集  实验: run{run_id}")
     print("=" * 60)
 
     # ── 加载数据 ──
@@ -170,9 +183,9 @@ def main():
     loader = train_loader if args.split == "train" else val_loader
 
     # ── 加载模型 ──
-    print(f"\n[2/4] 加载模型检查点: {args.checkpoint}")
+    print(f"\n[2/4] 加载模型检查点: {ckpt_path}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     model_cfg = ckpt.get("model_config") or default_config()
     model = build_model(model_cfg)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -206,10 +219,10 @@ def main():
     csv_name = f"predictions_{args.split}_{timestamp}.csv"
     metrics_name = "predictions_metrics.txt"
 
-    df.to_pickle(os.path.join(OUT_DIR, pkl_name))
-    df.head(10000).to_csv(os.path.join(OUT_DIR, csv_name), index=False, encoding="utf-8-sig")
+    df.to_pickle(os.path.join(pred_dir, pkl_name))
+    df.head(10000).to_csv(os.path.join(pred_dir, csv_name), index=False, encoding="utf-8-sig")
 
-    with open(os.path.join(OUT_DIR, metrics_name), "w", encoding="utf-8") as f:
+    with open(os.path.join(pred_dir, metrics_name), "w", encoding="utf-8") as f:
         f.write(f"MPF-Net 预测指标 ({args.split}集)\n")
         f.write(f"{'=' * 50}\n")
         f.write(f"总样本: {len(df):,}\n")
@@ -220,11 +233,22 @@ def main():
             f.write(f"  {int(row['hour']):02d}:00  "
                     f"RMSE={row['RMSE (kW)']:>8}  MAE={row['MAE (kW)']:>8}  MAPE={row['MAPE (%)']:>8}\n")
 
-    print(f"\n      结果保存: {OUT_DIR}/{pkl_name}")
-    print(f"      预览:     {OUT_DIR}/{csv_name}")
-    print(f"      指标:     {OUT_DIR}/{metrics_name}")
+    print(f"\n      结果保存: {pred_dir}/{pkl_name}")
+    print(f"      预览:     {pred_dir}/{csv_name}")
+    print(f"      指标:     {pred_dir}/{metrics_name}")
     print(f"\n{'=' * 60}")
     print("预测完成!")
+
+
+def _detect_latest_run():
+    """从 runs/ 目录找到最新 run_id。"""
+    if not os.path.isdir("runs"):
+        return None
+    existing = [d for d in os.listdir("runs")
+                if d.startswith("run") and d[3:].isdigit()]
+    if not existing:
+        return None
+    return max(int(d[3:]) for d in existing)
 
 
 if __name__ == "__main__":

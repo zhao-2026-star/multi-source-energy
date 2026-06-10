@@ -32,6 +32,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mpf_net import build_model, default_config
 from data_loader import build_dataloaders
+import run_utils
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -41,10 +42,6 @@ from data_loader import build_dataloaders
 DATA_DIR = "./data/feature_engineered"
 BERT_PATH = "./data/bert_embeddings.pkl"
 META_PATH = "./data/raw/变压器台账.xlsx"
-CKPT_DIR = "./checkpoints"
-LOG_DIR = "./logs"
-os.makedirs(CKPT_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -72,12 +69,17 @@ def compute_metrics(pred, target):
 # ═══════════════════════════════════════════════════════════════
 
 class Trainer:
-    def __init__(self, model, train_loader, val_loader, config, model_cfg=None):
+    def __init__(self, model, train_loader, val_loader, config, model_cfg=None,
+                 ckpt_dir="./checkpoints", log_dir="./logs"):
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.config = config
         self.model_cfg = model_cfg
+        self.ckpt_dir = ckpt_dir
+        self.log_dir = log_dir
+        os.makedirs(ckpt_dir, exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
@@ -216,13 +218,13 @@ class Trainer:
         # 保存训练历史
         hist_df = pd.DataFrame(self.history)
         fname = f"train_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        hist_df.to_csv(os.path.join(LOG_DIR, fname), index=False)
-        print(f"\n训练日志已保存: {LOG_DIR}/{fname}")
+        hist_df.to_csv(os.path.join(self.log_dir, fname), index=False)
+        print(f"\n训练日志已保存: {self.log_dir}/{fname}")
         print(f"最佳 val_loss: {self.best_val_loss:.4f}")
         return self.history
 
     def _save_checkpoint(self, epoch, val_loss):
-        path = os.path.join(CKPT_DIR, "mpf_net_best.pth")
+        path = os.path.join(self.ckpt_dir, "mpf_net_best.pth")
         torch.save({
             "epoch": epoch,
             "model_state_dict": self.model.state_dict(),
@@ -256,14 +258,21 @@ def parse_args():
                    help="滑动窗口步长 (24=每天一次预测)")
     p.add_argument("--resume", type=str, default=None,
                    help="从检查点恢复训练")
+    p.add_argument("--run_id", type=int, default=None,
+                   help="实验编号 (默认自动检测下一个)")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
 
+    # ── 运行目录 ──
+    run_id = args.run_id or run_utils.get_next_run_id()
+    ckpt_dir = run_utils.get_weight_dir(run_id)
+    log_dir = run_utils.get_log_dir(run_id)
+
     print("=" * 60)
-    print("MPF-Net 多源异构数据融合负荷预测")
+    print(f"MPF-Net 训练   实验编号: run{run_id}")
     print("=" * 60)
 
     # ── DataLoader ──
@@ -287,14 +296,17 @@ def main():
     }
 
     # ── Trainer ──
-    trainer = Trainer(model, train_loader, val_loader, train_cfg, model_cfg)
+    trainer = Trainer(model, train_loader, val_loader, train_cfg, model_cfg,
+                      ckpt_dir=ckpt_dir, log_dir=log_dir)
 
     if args.resume:
         trainer.load_checkpoint(args.resume)
 
     trainer.train(args.epochs)
 
-    print(f"\n完成! 最佳模型: {CKPT_DIR}/mpf_net_best.pth")
+    print(f"\n完成! 最佳模型: {ckpt_dir}/mpf_net_best.pth")
+    print(f"训练日志: {log_dir}")
+    print(f"使用: python predict.py --run_id {run_id}")
 
 
 if __name__ == "__main__":
